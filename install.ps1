@@ -49,21 +49,35 @@ function Test-MatchingFileStructure {
         [Parameter(Mandatory = $true)]
         [string]$ArchivePath,
         [Parameter(Mandatory = $true)]
-        [string]$DestinationPath,
-        [Parameter(Mandatory = $true)]
-        [System.IO.FileInfo[]]$DestinationFiles
+        [string]$DestinationPath
     )
 
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
+    $archivePaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
     try {
-        $archiveFiles = @(
-            $archive.Entries |
-                Where-Object { -not $_.FullName.EndsWith('/') -and -not $_.FullName.EndsWith('\') } |
-                ForEach-Object { $_.FullName.Replace('\', '/') } |
-                Sort-Object -Unique
-        )
+        foreach ($entry in $archive.Entries) {
+            $entryPath = $entry.FullName.Replace('\', '/').TrimStart('/')
+            if ([string]::IsNullOrWhiteSpace($entryPath)) {
+                continue
+            }
+
+            $isDirectory = $entry.FullName.EndsWith('/') -or $entry.FullName.EndsWith('\')
+            if (-not $isDirectory) {
+                [void]$archivePaths.Add($entryPath)
+            }
+
+            $directoryPath = if ($isDirectory) { $entryPath.TrimEnd('/') } else { [System.IO.Path]::GetDirectoryName($entryPath.Replace('/', [System.IO.Path]::DirectorySeparatorChar)) }
+            while (-not [string]::IsNullOrWhiteSpace($directoryPath)) {
+                [void]$archivePaths.Add($directoryPath.Replace('\', '/'))
+                $parent = [System.IO.Path]::GetDirectoryName($directoryPath)
+                if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $directoryPath) {
+                    break
+                }
+                $directoryPath = $parent
+            }
+        }
     }
     finally {
         $archive.Dispose()
@@ -74,18 +88,10 @@ function Test-MatchingFileStructure {
         $destinationRoot += [System.IO.Path]::DirectorySeparatorChar
     }
 
-    $destinationRelativeFiles = @(
-        $DestinationFiles |
-            ForEach-Object { $_.FullName.Substring($destinationRoot.Length).Replace('\', '/') } |
-            Sort-Object -Unique
-    )
-
-    if ($archiveFiles.Count -ne $destinationRelativeFiles.Count) {
-        return $false
-    }
-
-    foreach ($file in $archiveFiles) {
-        if ($destinationRelativeFiles -notcontains $file) {
+    $destinationItems = @(Get-ChildItem -LiteralPath $DestinationPath -Force -Recurse)
+    foreach ($item in $destinationItems) {
+        $relativePath = $item.FullName.Substring($destinationRoot.Length).Replace('\', '/')
+        if (-not $archivePaths.Contains($relativePath)) {
             return $false
         }
     }
@@ -101,9 +107,9 @@ try {
     Invoke-WebRequest -Uri $downloadUrl -OutFile $tempZip -UseBasicParsing
     Write-Host 'Download complete.' -ForegroundColor Green
 
-    $existingFiles = @(Get-ChildItem -LiteralPath $destination -File -Recurse -Force)
-    if ($existingFiles.Count -gt 0 -and -not (Test-MatchingFileStructure -ArchivePath $tempZip -DestinationPath $destination -DestinationFiles $existingFiles)) {
-        throw 'The destination folder contains files that do not match the YTLCCV installation structure. Choose an empty folder or the existing YTLCCV folder.'
+    $existingItems = @(Get-ChildItem -LiteralPath $destination -Force -Recurse)
+    if ($existingItems.Count -gt 0 -and -not (Test-MatchingFileStructure -ArchivePath $tempZip -DestinationPath $destination)) {
+        throw 'The destination folder contains files or folders that do not match the YTLCCV installation structure. Choose an empty folder or the existing YTLCCV folder.'
     }
 
     Write-Host "Extracting to: $destination" -ForegroundColor Yellow
