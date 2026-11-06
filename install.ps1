@@ -44,6 +44,55 @@ function Read-ExtractionPath {
     } while ($true)
 }
 
+function Test-MatchingFileStructure {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ArchivePath,
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationPath,
+        [Parameter(Mandatory = $true)]
+        [System.IO.FileInfo[]]$DestinationFiles
+    )
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
+
+    try {
+        $archiveFiles = @(
+            $archive.Entries |
+                Where-Object { -not $_.FullName.EndsWith('/') -and -not $_.FullName.EndsWith('\') } |
+                ForEach-Object { $_.FullName.Replace('\', '/') } |
+                Sort-Object -Unique
+        )
+    }
+    finally {
+        $archive.Dispose()
+    }
+
+    $destinationRoot = [System.IO.Path]::GetFullPath($DestinationPath)
+    if (-not $destinationRoot.EndsWith([System.IO.Path]::DirectorySeparatorChar)) {
+        $destinationRoot += [System.IO.Path]::DirectorySeparatorChar
+    }
+
+    $destinationRelativeFiles = @(
+        $DestinationFiles |
+            ForEach-Object { $_.FullName.Substring($destinationRoot.Length).Replace('\', '/') } |
+            Sort-Object -Unique
+    )
+
+    if ($archiveFiles.Count -ne $destinationRelativeFiles.Count) {
+        return $false
+    }
+
+    foreach ($file in $archiveFiles) {
+        if ($destinationRelativeFiles -notcontains $file) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
 Write-Banner
 $destination = Read-ExtractionPath
 
@@ -51,6 +100,11 @@ try {
     Write-Host 'Downloading YTLCCV...' -ForegroundColor Yellow
     Invoke-WebRequest -Uri $downloadUrl -OutFile $tempZip -UseBasicParsing
     Write-Host 'Download complete.' -ForegroundColor Green
+
+    $existingFiles = @(Get-ChildItem -LiteralPath $destination -File -Recurse -Force)
+    if ($existingFiles.Count -gt 0 -and -not (Test-MatchingFileStructure -ArchivePath $tempZip -DestinationPath $destination -DestinationFiles $existingFiles)) {
+        throw 'The destination folder contains files that do not match the YTLCCV installation structure. Choose an empty folder or the existing YTLCCV folder.'
+    }
 
     Write-Host "Extracting to: $destination" -ForegroundColor Yellow
     Expand-Archive -LiteralPath $tempZip -DestinationPath $destination -Force
